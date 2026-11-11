@@ -12,7 +12,7 @@ export type Categorie = { id: string; nom: string; description?: string; produit
 export const CATEGORIES: Categorie[] = [
   {
     id: "alimentation",
-    nom: "🍚 Alimentation",
+    nom: "Alimentation",
     description: "Riz, huile, sucre, pâtes…",
     produits: [
       { id: "riz5", nom: "Riz parfumé 5 kg", prix: 4500 },
@@ -24,7 +24,7 @@ export const CATEGORIES: Categorie[] = [
   },
   {
     id: "boissons",
-    nom: "🥤 Boissons",
+    nom: "Boissons",
     description: "Eau, sodas, jus",
     produits: [
       { id: "eau15", nom: "Eau minérale 1,5 L", prix: 500 },
@@ -34,7 +34,7 @@ export const CATEGORIES: Categorie[] = [
   },
   {
     id: "hygiene",
-    nom: "🧼 Hygiène",
+    nom: "Hygiène",
     description: "Savon, dentifrice, lessive",
     produits: [
       { id: "savon", nom: "Savon de toilette", prix: 300 },

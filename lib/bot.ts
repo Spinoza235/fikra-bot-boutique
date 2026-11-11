@@ -1,5 +1,10 @@
 // lib/bot.ts
 // Le "cerveau" du bot : décide quoi répondre à chaque message reçu.
+//
+// Parcours du client :
+//   Bonjour -> catégories -> produits -> quantité -> panier
+//   -> Commander -> nom -> quartier -> récapitulatif -> Confirmer
+//   -> le client reçoit son numéro de commande, le propriétaire reçoit la commande
 
 import { BOUTIQUE, CATEGORIES, prix, trouverCategorie, trouverProduit } from "./catalogue";
 import { lireSession, sauverSession, type Session } from "./session";
@@ -19,10 +24,10 @@ export type MessageRecu = {
 };
 
 export async function traiterMessage(msg: MessageRecu, nomClient?: string) {
-  // JOUR 3 : mode perroquet (le bot répète ce qu'on lui écrit)
+  // Mode test : le bot répète ce qu'on lui écrit (variable BOT_MODE=perroquet)
   if (process.env.BOT_MODE === "perroquet") {
     const texte = msg.text?.body ?? `(message de type ${msg.type})`;
-    await envoyerTexte(msg.from, `🦜 Vous avez écrit : ${texte}`);
+    await envoyerTexte(msg.from, `Vous avez écrit : ${texte}`);
     return;
   }
 
@@ -43,7 +48,7 @@ export async function traiterMessage(msg: MessageRecu, nomClient?: string) {
     } else {
       await envoyerTexte(
         session.telephone,
-        "Pour l'instant je comprends seulement les messages écrits et les menus 🙂\nÉcrivez *menu* pour commencer."
+        "Je comprends uniquement les messages écrits et les menus.\nÉcrivez *menu* pour commencer."
       );
     }
   } finally {
@@ -54,16 +59,28 @@ export async function traiterMessage(msg: MessageRecu, nomClient?: string) {
 // ---------- Quand le client ÉCRIT un message ----------
 
 async function surTexte(session: Session, texte: string, nomClient?: string) {
-  const mot = texte
-    .trim()
+  const brut = texte.trim();
+  const mot = brut
     .toLowerCase()
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, ""); // enlève les accents
 
-  // Le bot attend une quantité : le client peut écrire un nombre
-  if (session.etape === "quantite") {
-    const n = parseInt(mot, 10);
-    if (n >= 1 && n <= 99) return ajouterAuPanier(session, n);
+  // Mots-clés valables à tout moment
+  if (mot === "annuler") return annulerCommande(session);
+  if (mot === "menu") return envoyerCategories(session, "Choisissez une catégorie.");
+
+  switch (session.etape) {
+    case "quantite": {
+      const n = parseInt(mot, 10);
+      if (n >= 1 && n <= 99) return ajouterAuPanier(session, n);
+      break;
+    }
+    case "nom":
+      return enregistrerNom(session, brut);
+    case "adresse":
+      return enregistrerAdresse(session, brut);
+    case "confirmation":
+      return envoyerRecapitulatif(session, "Merci de confirmer ou de modifier votre commande.");
   }
 
   if (mot.includes("panier")) return afficherPanier(session);
@@ -86,23 +103,25 @@ async function surChoix(session: Session, choix: string) {
     case "qte":
       return ajouterAuPanier(session, parseInt(valeur, 10));
     case "menu":
-      return envoyerCategories(session, "Choisissez une catégorie 👇");
+      return envoyerCategories(session, "Choisissez une catégorie.");
     case "panier":
       return afficherPanier(session);
     case "vider":
       return viderPanier(session);
     case "commander":
-      // La suite (nom, quartier, confirmation) sera faite en semaine 2
-      return envoyerTexte(
-        session.telephone,
-        "👍 Merci ! La validation de la commande (nom, quartier, livraison) arrive bientôt.\nVotre panier est bien gardé."
-      );
+      return demanderNom(session);
+    case "confirmer":
+      return confirmerCommande(session);
+    case "modifier":
+      return afficherPanier(session);
+    case "annuler":
+      return annulerCommande(session);
     default:
-      return envoyerCategories(session, "Choisissez une catégorie 👇");
+      return envoyerCategories(session, "Choisissez une catégorie.");
   }
 }
 
-// ---------- Les différentes réponses ----------
+// ---------- Outils ----------
 
 function totalPanier(session: Session) {
   return session.panier.reduce((total, ligne) => {
@@ -111,11 +130,33 @@ function totalPanier(session: Session) {
   }, 0);
 }
 
+function lignesPanier(session: Session) {
+  return session.panier
+    .map((l) => {
+      const p = trouverProduit(l.produitId);
+      return p ? `• ${l.quantite} × ${p.nom} : ${prix(p.prix * l.quantite)}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Numéro de commande court et lisible, ex. "CMD-4F7K2Q"
+function numeroCommande() {
+  return "CMD-" + Date.now().toString(36).toUpperCase().slice(-6);
+}
+
+// "23566925838" -> "+235 66 92 58 38" (affichage seulement)
+function telephoneLisible(numero: string) {
+  return "+" + numero.replace(/^(\d{3})(\d{2})(\d{2})(\d{2})(\d{2})$/, "$1 $2 $3 $4 $5");
+}
+
+// ---------- Menus et panier ----------
+
 async function envoyerAccueil(session: Session, nomClient?: string) {
-  const bonjour = nomClient ? `Bonjour ${nomClient} 👋` : "Bonjour 👋";
+  const bonjour = nomClient ? `Bonjour ${nomClient},` : "Bonjour,";
   await envoyerCategories(
     session,
-    `${bonjour}\nBienvenue chez *${BOUTIQUE.nom}*.\nCommandez ici en quelques clics, on vous livre.`
+    `${bonjour}\nBienvenue chez *${BOUTIQUE.nom}*.\nCommandez en quelques clics, nous vous livrons.`
   );
 }
 
@@ -132,7 +173,7 @@ async function envoyerCategories(session: Session, texte: string) {
   if (session.panier.length > 0) {
     sections.push({
       titre: "Mon panier",
-      lignes: [{ id: "panier", titre: "🛒 Voir mon panier", description: `Total : ${prix(totalPanier(session))}` }],
+      lignes: [{ id: "panier", titre: "Voir mon panier", description: `Total : ${prix(totalPanier(session))}` }],
     });
   }
 
@@ -141,7 +182,7 @@ async function envoyerCategories(session: Session, texte: string) {
 
 async function envoyerProduits(session: Session, categorieId: string) {
   const categorie = trouverCategorie(categorieId);
-  if (!categorie) return envoyerCategories(session, "Catégorie introuvable. Choisissez 👇");
+  if (!categorie) return envoyerCategories(session, "Catégorie introuvable. Choisissez une catégorie.");
 
   await envoyerListe(session.telephone, {
     entete: categorie.nom,
@@ -156,21 +197,21 @@ async function envoyerProduits(session: Session, categorieId: string) {
           description: p.description ? `${prix(p.prix)} · ${p.description}` : prix(p.prix),
         })),
       },
-      { titre: "Navigation", lignes: [{ id: "menu", titre: "⬅️ Autres catégories" }] },
+      { titre: "Navigation", lignes: [{ id: "menu", titre: "Autres catégories" }] },
     ],
   });
 }
 
 async function demanderQuantite(session: Session, produitId: string) {
   const produit = trouverProduit(produitId);
-  if (!produit) return envoyerCategories(session, "Produit introuvable. Choisissez 👇");
+  if (!produit) return envoyerCategories(session, "Produit introuvable. Choisissez une catégorie.");
 
   session.etape = "quantite";
   session.produitEnCours = produit.id;
 
   await envoyerBoutons(
     session.telephone,
-    `*${produit.nom}* : ${prix(produit.prix)} l'unité.\nCombien en voulez-vous ?\n(Touchez un bouton ou écrivez un nombre)`,
+    `*${produit.nom}* : ${prix(produit.prix)} l'unité.\nQuelle quantité souhaitez-vous ?\nTouchez un bouton ou écrivez un nombre.`,
     [
       { id: "qte:1", titre: "1" },
       { id: "qte:2", titre: "2" },
@@ -181,7 +222,7 @@ async function demanderQuantite(session: Session, produitId: string) {
 
 async function ajouterAuPanier(session: Session, quantite: number) {
   const produit = session.produitEnCours ? trouverProduit(session.produitEnCours) : undefined;
-  if (!produit || !(quantite >= 1)) return envoyerCategories(session, "Choisissez d'abord un produit 👇");
+  if (!produit || !(quantite >= 1)) return envoyerCategories(session, "Choisissez d'abord un produit.");
 
   const ligne = session.panier.find((l) => l.produitId === produit.id);
   if (ligne) ligne.quantite += quantite;
@@ -192,37 +233,122 @@ async function ajouterAuPanier(session: Session, quantite: number) {
 
   await envoyerBoutons(
     session.telephone,
-    `✅ ${quantite} × ${produit.nom} ajouté au panier.\nTotal du panier : *${prix(totalPanier(session))}*`,
+    `Ajouté au panier : ${quantite} × ${produit.nom}.\nTotal du panier : *${prix(totalPanier(session))}*`,
     [
-      { id: "menu", titre: "➕ Autre produit" },
-      { id: "panier", titre: "🛒 Voir le panier" },
-      { id: "commander", titre: "✅ Commander" },
+      { id: "menu", titre: "Autre produit" },
+      { id: "panier", titre: "Voir le panier" },
+      { id: "commander", titre: "Commander" },
     ]
   );
 }
 
 async function afficherPanier(session: Session) {
+  session.etape = "menu";
   if (session.panier.length === 0) {
-    return envoyerCategories(session, "🛒 Votre panier est vide.\nChoisissez une catégorie 👇");
+    return envoyerCategories(session, "Votre panier est vide.\nChoisissez une catégorie.");
   }
-
-  const lignes = session.panier.map((l) => {
-    const p = trouverProduit(l.produitId);
-    return p ? `• ${l.quantite} × ${p.nom} = ${prix(p.prix * l.quantite)}` : "";
-  });
 
   await envoyerBoutons(
     session.telephone,
-    `🛒 *Votre panier*\n\n${lignes.join("\n")}\n\n*Total : ${prix(totalPanier(session))}*`,
+    `*Votre panier*\n\n${lignesPanier(session)}\n\n*Total : ${prix(totalPanier(session))}*`,
     [
-      { id: "menu", titre: "➕ Ajouter" },
-      { id: "vider", titre: "🗑️ Vider" },
-      { id: "commander", titre: "✅ Commander" },
+      { id: "menu", titre: "Ajouter un produit" },
+      { id: "vider", titre: "Vider le panier" },
+      { id: "commander", titre: "Commander" },
     ]
   );
 }
 
 async function viderPanier(session: Session) {
   session.panier = [];
-  await envoyerCategories(session, "🗑️ Panier vidé.\nChoisissez une catégorie 👇");
+  await envoyerCategories(session, "Votre panier a été vidé.\nChoisissez une catégorie.");
+}
+
+// ---------- Validation de la commande ----------
+
+// Étape 1 : le nom
+async function demanderNom(session: Session) {
+  if (session.panier.length === 0) {
+    return envoyerCategories(session, "Votre panier est vide.\nChoisissez d'abord un produit.");
+  }
+  session.etape = "nom";
+  await envoyerTexte(
+    session.telephone,
+    "Pour finaliser votre commande, quel est votre *nom complet* ?\n\n(Écrivez *annuler* pour revenir au menu.)"
+  );
+}
+
+async function enregistrerNom(session: Session, nom: string) {
+  if (nom.length < 2 || nom.length > 60) {
+    return envoyerTexte(session.telephone, "Merci d'indiquer un nom valide (2 à 60 caractères).");
+  }
+  session.nom = nom;
+  session.etape = "adresse";
+  await envoyerTexte(
+    session.telephone,
+    `Merci, ${nom}\nIndiquez votre *quartier* et un *point de repère* pour la livraison.\n\nExemple : Moursal, près de la pharmacie du marché.`
+  );
+}
+
+// Étape 2 : le quartier
+async function enregistrerAdresse(session: Session, adresse: string) {
+  if (adresse.length < 3 || adresse.length > 150) {
+    return envoyerTexte(session.telephone, "Merci d'indiquer votre quartier et un point de repère.");
+  }
+  session.adresse = adresse;
+  await envoyerRecapitulatif(session);
+}
+
+// Étape 3 : le récapitulatif
+async function envoyerRecapitulatif(session: Session, intro = "Vérifiez votre commande avant de la confirmer.") {
+  session.etape = "confirmation";
+  await envoyerBoutons(
+    session.telephone,
+    `*Récapitulatif de votre commande*\n\n${lignesPanier(session)}\n\n*Total : ${prix(totalPanier(session))}*\n\nNom : ${session.nom}\nLivraison : ${session.adresse}\n\n${intro}`,
+    [
+      { id: "confirmer", titre: "Confirmer" },
+      { id: "modifier", titre: "Modifier" },
+      { id: "annuler", titre: "Annuler" },
+    ]
+  );
+}
+
+// Étape 4 : confirmation -> message au client + message au propriétaire
+async function confirmerCommande(session: Session) {
+  if (session.panier.length === 0 || !session.nom || !session.adresse) {
+    return envoyerCategories(session, "Aucune commande en cours.\nChoisissez une catégorie.");
+  }
+
+  const numero = numeroCommande();
+  const total = prix(totalPanier(session));
+  const detail = lignesPanier(session);
+
+  // Message au client
+  await envoyerTexte(
+    session.telephone,
+    `*Commande confirmée*\n\nNuméro : *${numero}*\nTotal : *${total}*\n\nMerci pour votre confiance, ${session.nom}\n${BOUTIQUE.nom} vous contactera sur ce numéro pour organiser la livraison.`
+  );
+
+  // Message au propriétaire de la boutique
+  const proprietaire = process.env.OWNER_PHONE;
+  if (proprietaire) {
+    await envoyerTexte(
+      proprietaire,
+      `*Nouvelle commande ${numero}*\n\nClient : ${session.nom}\nTéléphone : ${telephoneLisible(session.telephone)}\nLivraison : ${session.adresse}\n\n${detail}\n\n*Total : ${total}*\n\nContacter le client : https://wa.me/${session.telephone}`
+    );
+  } else {
+    console.error("OWNER_PHONE manquant : le propriétaire n'a pas reçu la commande", numero);
+  }
+
+  // On repart à zéro (le nom est gardé pour la prochaine commande)
+  session.panier = [];
+  session.adresse = null;
+  session.etape = "menu";
+  session.produitEnCours = null;
+}
+
+async function annulerCommande(session: Session) {
+  session.etape = "menu";
+  session.produitEnCours = null;
+  await envoyerCategories(session, "Commande annulée. Votre panier est conservé.\nChoisissez une catégorie.");
 }

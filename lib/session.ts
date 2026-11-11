@@ -1,17 +1,24 @@
 // lib/session.ts
-// La "mémoire" du bot : où en est chaque client et ce qu'il a dans son panier.
-// - Si Supabase est configuré (jours 6-7) : tout est enregistré dans la base de données.
-// - Sinon (jours 4-5) : mémoire temporaire, qui peut s'effacer à tout moment sur Vercel.
+// La "mémoire" du bot : où en est chaque client, son panier, son nom et son adresse.
+// - Si Supabase est configuré : tout est enregistré dans la base de données.
+// - Sinon : mémoire temporaire, qui peut s'effacer quand Vercel met le bot en veille.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export type LignePanier = { produitId: string; quantite: number };
 
+// Les étapes de la conversation
+// menu -> quantite -> (panier) -> nom -> adresse -> confirmation -> menu
+export type Etape = "menu" | "quantite" | "nom" | "adresse" | "confirmation";
+const ETAPES: Etape[] = ["menu", "quantite", "nom", "adresse", "confirmation"];
+
 export type Session = {
   telephone: string;
-  etape: "menu" | "quantite";
+  etape: Etape;
   produitEnCours: string | null;
   panier: LignePanier[];
+  nom: string | null;
+  adresse: string | null;
   dernierMessageId: string | null;
 };
 
@@ -28,7 +35,15 @@ function supabase() {
 const memoireTemporaire = new Map<string, Session>();
 
 function nouvelleSession(telephone: string): Session {
-  return { telephone, etape: "menu", produitEnCours: null, panier: [], dernierMessageId: null };
+  return {
+    telephone,
+    etape: "menu",
+    produitEnCours: null,
+    panier: [],
+    nom: null,
+    adresse: null,
+    dernierMessageId: null,
+  };
 }
 
 export async function lireSession(telephone: string): Promise<Session> {
@@ -46,9 +61,11 @@ export async function lireSession(telephone: string): Promise<Session> {
 
   return {
     telephone,
-    etape: data.etape === "quantite" ? "quantite" : "menu",
+    etape: ETAPES.includes(data.etape) ? data.etape : "menu",
     produitEnCours: data.produit_en_cours,
     panier: Array.isArray(data.panier) ? data.panier : [],
+    nom: data.nom ?? null,
+    adresse: data.adresse ?? null,
     dernierMessageId: data.dernier_message_id,
   };
 }
@@ -65,6 +82,8 @@ export async function sauverSession(s: Session) {
     etape: s.etape,
     produit_en_cours: s.produitEnCours,
     panier: s.panier,
+    nom: s.nom,
+    adresse: s.adresse,
     dernier_message_id: s.dernierMessageId,
     mis_a_jour_le: new Date().toISOString(),
   });
